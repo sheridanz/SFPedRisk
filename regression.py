@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 from scipy.stats import mode
 from sklearn import linear_model
 from scipy.stats import poisson
+from scipy.misc import factorial
+from scipy import optimize
 from pandas.stats.api import ols
 
 raw_ints = pd.read_csv('C:\Users\Sheridan\Desktop\Dropbox\Insight\My Files\intersectionsbb.csv')
@@ -12,8 +14,8 @@ inj = pd.read_csv('C:\Users\Sheridan\Desktop\Dropbox\Insight\My Files\injuries.c
 streets = pd.read_csv('C:\Users\Sheridan\Desktop\Dropbox\Insight\My Files\streets.csv')
 
 # Ceremonial class excludes most of Market street, whose complicated intersection/crosswalk patterns cannot be modeled with available data
-ints = raw_ints[(raw_ints.intrsctn_type=='INTERSECTIONS') & (raw_ints.BSP_class!='Alley') & (raw_ints.BSP_class!='Ceremonial') & (raw_ints.pvtraf >= 0) ]
-
+ints = raw_ints[(raw_ints.intrsctn_type=='INTERSECTIONS') & (raw_ints.BSP_class!='Alley') & (raw_ints.BSP_class!='Ceremonial') & (raw_ints.BSP_class!='Paseo') & (raw_ints.pvtraf > 0) ]
+ints['constant'] = 1 # For use in regression
 # Some test neighborhoods and intersection types to look at for convenience
 # w_nhoods is a regular grid of mostly residential neighborhoods with a few commercial avenues and one major surface road highway
 # e_nhoods is the busiest region of the city in terms of pedestrian and vehicle traffic; mostly gridlike, Market street roughly bisects it
@@ -27,7 +29,7 @@ for w_nhood in w_nhoods:
 ints_sig_w = ints_hood_w[ints_hood_w.signal_yn == 1]
 ints_fstop_w = ints_hood_w[ints_hood_w.sign_stop_yn == 1]
 ints_lstop_w = ints_hood_w[ints_hood_w.limited_stop_yn == 1]
-ints_uncont_w = ints_hstop_w[(ints_hood_w.limited_stop_yn == 0) & (ints_hood_w.sign_stop_yn == 0) & (ints_hood_w.signal_yn == 0)]
+ints_uncont_w = ints_hood_w[(ints_hood_w.limited_stop_yn == 0) & (ints_hood_w.sign_stop_yn == 0) & (ints_hood_w.signal_yn == 0)]
 
 ints_hood_e = pd.DataFrame()
 for e_nhood in e_nhoods:
@@ -35,7 +37,7 @@ for e_nhood in e_nhoods:
 ints_sig_e = ints_hood_e[ints_hood_e.signal_yn == 1]
 ints_fstop_e = ints_hood_e[ints_hood_e.sign_stop_yn == 1]
 ints_lstop_e = ints_hood_e[ints_hood_e.limited_stop_yn == 1]
-ints_uncont_e = ints_hstop_e[(ints_hood_e.limited_stop_yn == 0) & (ints_hood_e.sign_stop_yn == 0) & (ints_hood_e.signal_yn == 0)]
+ints_uncont_e = ints_hood_e[(ints_hood_e.limited_stop_yn == 0) & (ints_hood_e.sign_stop_yn == 0) & (ints_hood_e.signal_yn == 0)]
 
 def holdout(data): # create set of training and testing data via holdout of half intersections randomly
     ints_shuf = data.reindex(np.random.permutation(data.index))
@@ -45,17 +47,10 @@ def holdout(data): # create set of training and testing data via holdout of half
 
 def bilin_regr(data,xvars,plot=True):
     regr=linear_model.LinearRegression()
-    #xvars = ['pvtraf','max_sl'] if incl_sl is True else ['pvtraf']
     X = shape_xvars(data[xvars])
-    #X = np.asarray(data[xvars])
-    #if incl_sl is True:
-   # 	for i in range(len(X)):
-   # 		X[i] = [a*b for a,b in zip(X[i],[1e-8,1])]
-   # else:
-   # 	X = X * 1e-8
-    #X=datar[:,(traf_ind,sl_max_ind)].reshape(-1,1)/1e8
     y = np.asarray(data.pedinj_count)
     regr.fit(X,y)
+    print "Coeffs, intercept, score = "
     print regr.coef_, regr.intercept_, regr.score(X,y)
     if plot==True:
         plt.plot(data['pvtraf'],regr.predict(X))
@@ -80,7 +75,7 @@ def regr_test(data):
 	plt.scatter(test_data['pvtraf'],test_data['pedinj_count'])
 	plt.show()
 
-def lrtest(data,xvars):
+def lrtest(data,xvars): # Likelihood ratio test between input model and null "traffic only" model
     pedinj_count = data['pedinj_count']
     xvars_0 = shape_xvars(data[['pvtraf']])
     xvars_1 = shape_xvars(data[xvars])
@@ -134,8 +129,29 @@ def sim_data(data,xvars): # simulate Poisson data from model
 
 def pd_regr(data,xvars,convs): # regression test using pandas
     y = data['pedinj_count']
-    x = dict()
+    X = dict()
     for var,conv in zip(xvars,convs):
-        x[var] = data[var]*conv
-    regr = ols(y = y, x = x)
+        X[var] = data[var]*conv
+    regr = ols(y = y, x = X)
     return regr
+
+# Calculating the log-likelihood of a Poisson regression model
+# Log(Y) = b0 + b1x1 + b2x2 + ... ---> Y = e^(b0 + b1x1 + b2x2 + ...)
+# LL = Sum(y*beta*x - e**[beta*x] - log (y!))
+
+def ll_poisson(betas,data=ints,xvars=['pvtraf']): 
+    if 'constant' not in xvars:
+        xvars.append('constant')
+    X = data[xvars]
+    y = data['pedinj_count']
+    conv=np.concatenate(([1e-8],np.ones(len(xvars)-1)))
+    xpred = np.dot(X*conv,betas)
+    negL = -((y*xpred).sum() - np.sum(np.e**(xpred))) # We will minimize this function for betas, so don't need to include log(y) term
+    return negL
+
+def ll_min(data,xvars,ftol=1e-3):
+    conv=np.concatenate(([1e-8],np.ones(len(xvars)-1)))
+    ols_regr = pd_regr(data,xvars,conv)
+    b_guess = ols_regr._results['beta']
+    ll_opt = optimize.fmin(ll_poisson,b_guess,args=(data,xvars),ftol=ftol)
+    return ll_opt
